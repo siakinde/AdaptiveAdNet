@@ -327,4 +327,59 @@
     )
 )
 
+;; --- Newly-Added Feature:---
+;; Records a click event, handles payment and budget deduction. Called by the slot owner (publisher).
+(define-public (record-click (campaign-id uint) (slot-id uint))
+    (let (
+        (campaign (unwrap! (map-get? campaigns campaign-id) err-not-found))
+        (slot (unwrap! (map-get? ad-slots slot-id) err-not-found))
+        (bid (unwrap! (map-get? campaign-slot-bids {campaign-id: campaign-id, slot-id: slot-id}) err-not-found))
+        (bid-amount (get bid-amount bid))
+        (platform-fee (calculate-platform-fee bid-amount))
+        (publisher-payment (- bid-amount platform-fee))
+        (publisher (get publisher slot))
+        (advertiser (get advertiser campaign))
+        (publisher-data (unwrap! (map-get? publishers publisher) err-not-found))
+        (advertiser-data (unwrap! (map-get? advertisers advertiser) err-not-found))
+    )
+        (asserts! (is-eq tx-sender publisher) err-unauthorized)
+        (asserts! (get active campaign) err-invalid-params)
+        (asserts! (get active bid) err-invalid-params)
+        ;; Check if campaign has enough budget remaining for the bid amount
+        (asserts! (<= (+ (get spent campaign) bid-amount) (get budget campaign)) err-insufficient-funds)
+        
+        ;; Payment: Transfer STX from the contract (tx-sender) to the publisher
+        (try! (as-contract (stx-transfer? publisher-payment tx-sender publisher)))
+        
+        ;; Update campaign: increment clicks and spent budget
+        (map-set campaigns campaign-id (merge campaign {
+            clicks: (+ (get clicks campaign) u1),
+            spent: (+ (get spent campaign) bid-amount)
+        }))
+        
+        ;; Update slot: increment clicks
+        (map-set ad-slots slot-id (merge slot {
+            clicks: (+ (get clicks slot) u1)
+        }))
+        
+        ;; Update publisher earnings (net payment)
+        (map-set publishers publisher (merge publisher-data {
+            total-earned: (+ (get total-earned publisher-data) publisher-payment)
+        }))
+        
+        ;; Update advertiser total spending (gross bid)
+        (map-set advertisers advertiser (merge advertiser-data {
+            total-spent: (+ (get total-spent advertiser-data) bid-amount)
+        }))
+        
+        ;; Pause campaign immediately if budget is exhausted or close to exhaustion after this click
+        (if (<= (get budget campaign) (+ (get spent campaign) bid-amount))
+            (map-set campaigns campaign-id (merge campaign {active: false}))
+            true
+        )
+        
+        (ok true)
+    )
+)
+
 
